@@ -191,14 +191,22 @@ def _process_event(mid, sender_id: str, text) -> None:
         logger.info("SKIP duplicate: mid %s already processed.", mid)
         return
 
-    # --- Whitelist: unknown senders get a polite reply, then we stop. ---
-    if not db.is_whitelisted(sender_id):
+    user_profile = db.is_whitelisted(sender_id)
+
+    if user_profile is None:
         logger.info(
             "Unknown sender %s (not in users whitelist) — replying 'don't know you'.",
             sender_id,
         )
         send_text(sender_id, UNKNOWN_SENDER_MSG)
         return
+    
+    logger.info("Sender %s is whitelisted.", sender_id)
+
+    # --- Extract Name from the returned object and send greeting ---
+    # Adjust "name" to your exact Supabase column name if different
+    user_name = user_profile.get("name", "there")
+    send_text(sender_id, f"Hi {user_name}!")
 
     if not text:
         logger.info("Non-text message from %s — sending 'text only' reply.", sender_id)
