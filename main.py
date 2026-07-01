@@ -16,6 +16,7 @@ from instagram import send_text
 from config import (
     META_VERIFY_TOKEN,
     META_APP_SECRET,
+    INSTAGRAM_APP_SECRET,
     INSTAGRAM_ACCOUNT_ID,
     GRAPH_API_VERSION,
     GRAPH_API_HOST,
@@ -41,10 +42,11 @@ def _log_startup_config():
     logger.info("  SEND HOST           = %s", GRAPH_API_HOST)
     logger.info("  GRAPH_API_VERSION   = %s", GRAPH_API_VERSION)
     logger.info("  META_VERIFY_TOKEN   = %s", _mask(META_VERIFY_TOKEN))
+    logger.info("  META_APP_SECRET     = %s", _mask(META_APP_SECRET))
+    logger.info("  INSTAGRAM_APP_SECRET= %s", _mask(INSTAGRAM_APP_SECRET))
     logger.info(
-        "  META_APP_SECRET     = %s  (signature check %s)",
-        _mask(META_APP_SECRET),
-        "ON" if META_APP_SECRET else "OFF — dev only!",
+        "  signature check     = %s",
+        "ON" if (META_APP_SECRET or INSTAGRAM_APP_SECRET) else "OFF — dev only!",
     )
     logger.info(
         "  INSTAGRAM_ACCOUNT_ID= %s",
@@ -90,13 +92,26 @@ def verify_webhook(
 # --------------------------------------------------------------------------- #
 # Signature verification
 # --------------------------------------------------------------------------- #
+# Candidate signing secrets, in priority order. The Instagram-Login product may
+# sign with the Meta App Secret OR the Instagram app secret — we try each.
+_SIGNING_SECRETS = [
+    ("META_APP_SECRET", META_APP_SECRET),
+    ("INSTAGRAM_APP_SECRET", INSTAGRAM_APP_SECRET),
+]
+
+
 def _valid_signature(raw_body: bytes, header: str | None) -> bool:
     """Verify Meta's X-Hub-Signature-256 (HMAC-SHA256 of the raw body).
 
-    If META_APP_SECRET is unset we skip verification (dev only) and log a warning.
+    Tries every configured secret and logs which one matched. If NO secret is
+    configured, verification is skipped (dev only) and a warning is logged.
     """
-    if not META_APP_SECRET:
-        logger.warning("META_APP_SECRET not set — skipping webhook signature check.")
+    secrets = [(name, s) for name, s in _SIGNING_SECRETS if s]
+    if not secrets:
+        logger.warning(
+            "No app secret set (META_APP_SECRET / INSTAGRAM_APP_SECRET) — "
+            "skipping webhook signature check. Dev only."
+        )
         return True
     if not header or not header.startswith("sha256="):
         logger.warning(
@@ -104,17 +119,22 @@ def _valid_signature(raw_body: bytes, header: str | None) -> bool:
             "Either Meta didn't send it, or a proxy stripped it.", header,
         )
         return False
-    expected = hmac.new(
-        META_APP_SECRET.encode(), raw_body, hashlib.sha256
-    ).hexdigest()
+
     received = header.split("=", 1)[1]
-    if hmac.compare_digest(expected, received):
-        return True
+    tried = []
+    for name, secret in secrets:
+        expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+        if hmac.compare_digest(expected, received):
+            logger.info("Signature OK — matched %s.", name)
+            return True
+        tried.append(f"{name}({_mask(secret)})→sha256={expected[:12]}…")
+
     logger.warning(
-        "Sig FAILED: HMAC mismatch. expected sha256=%s… received sha256=%s… "
-        "Almost always META_APP_SECRET (%s) doesn't match the app that owns this "
-        "webhook subscription.",
-        expected[:12], received[:12], _mask(META_APP_SECRET),
+        "Sig FAILED: no configured secret matched received sha256=%s…. Tried: %s. "
+        "For Instagram-Login, the correct value is often the Instagram app secret "
+        "(Products → Instagram → API setup), NOT App Settings → Basic. Set it as "
+        "INSTAGRAM_APP_SECRET and watch for 'matched INSTAGRAM_APP_SECRET'.",
+        received[:12], "; ".join(tried),
     )
     return False
 

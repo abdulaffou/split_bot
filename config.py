@@ -42,6 +42,11 @@ INSTAGRAM_ACCOUNT_ID = os.getenv("INSTAGRAM_ACCOUNT_ID", "")
 # Optional: if unset, signature verification is skipped (dev only — a warning is
 # logged). Set it in production to reject forged POSTs.
 META_APP_SECRET = os.getenv("META_APP_SECRET", "")
+# For the Instagram-Login product the webhook can be signed with the *Instagram*
+# app secret (Products → Instagram → API setup with Instagram Login → Instagram
+# app secret) rather than the Meta App Secret above. Set both; the signature
+# check tries each and logs which one matched.
+INSTAGRAM_APP_SECRET = os.getenv("INSTAGRAM_APP_SECRET", "")
 
 # --- Google AI Studio (Gemini) ---
 GEMINI_API_KEY = _require("GEMINI_API_KEY")
