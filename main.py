@@ -17,10 +17,40 @@ from config import (
     META_VERIFY_TOKEN,
     META_APP_SECRET,
     INSTAGRAM_ACCOUNT_ID,
+    GRAPH_API_VERSION,
+    GRAPH_API_HOST,
     logger,
 )
 
 app = FastAPI(title="SplitBot", version="1.1.0")
+
+
+def _mask(secret: str, keep: int = 4) -> str:
+    """Show only the last `keep` chars of a secret for safe logging."""
+    if not secret:
+        return "(empty/unset)"
+    if len(secret) <= keep:
+        return "*" * len(secret)
+    return f"…{secret[-keep:]} (len={len(secret)})"
+
+
+@app.on_event("startup")
+def _log_startup_config():
+    logger.info("=" * 60)
+    logger.info("SplitBot starting (Instagram API with Instagram Login).")
+    logger.info("  SEND HOST           = %s", GRAPH_API_HOST)
+    logger.info("  GRAPH_API_VERSION   = %s", GRAPH_API_VERSION)
+    logger.info("  META_VERIFY_TOKEN   = %s", _mask(META_VERIFY_TOKEN))
+    logger.info(
+        "  META_APP_SECRET     = %s  (signature check %s)",
+        _mask(META_APP_SECRET),
+        "ON" if META_APP_SECRET else "OFF — dev only!",
+    )
+    logger.info(
+        "  INSTAGRAM_ACCOUNT_ID= %s",
+        INSTAGRAM_ACCOUNT_ID or "(unset — relying on is_echo only)",
+    )
+    logger.info("=" * 60)
 
 
 @app.get("/health")
@@ -37,10 +67,23 @@ def verify_webhook(
     token: str = Query(default="", alias="hub.verify_token"),
     challenge: str = Query(default="", alias="hub.challenge"),
 ):
+    logger.info(
+        "GET /webhook verify attempt: mode=%r, token(recv)=%r, token(expected)=%r",
+        mode, token, META_VERIFY_TOKEN,
+    )
     if mode == "subscribe" and token == META_VERIFY_TOKEN:
-        logger.info("Webhook verified by Meta.")
+        logger.info("Webhook verified by Meta. Echoing challenge.")
         return Response(content=challenge, media_type="text/plain")
-    logger.warning("Webhook verification failed (mode=%s).", mode)
+
+    # Be explicit about WHICH check failed so the terminal pinpoints it.
+    if mode != "subscribe":
+        logger.warning("Verify FAILED: hub.mode is %r, expected 'subscribe'.", mode)
+    else:
+        logger.warning(
+            "Verify FAILED: token mismatch. Meta sent %r but META_VERIFY_TOKEN is %r. "
+            "Make the dashboard 'Verify Token' EXACTLY equal to your env var.",
+            token, META_VERIFY_TOKEN,
+        )
     return Response(content="Verification failed", status_code=403)
 
 
@@ -56,12 +99,24 @@ def _valid_signature(raw_body: bytes, header: str | None) -> bool:
         logger.warning("META_APP_SECRET not set — skipping webhook signature check.")
         return True
     if not header or not header.startswith("sha256="):
-        logger.warning("Missing/invalid X-Hub-Signature-256 header.")
+        logger.warning(
+            "Sig FAILED: missing/invalid X-Hub-Signature-256 header (got %r). "
+            "Either Meta didn't send it, or a proxy stripped it.", header,
+        )
         return False
     expected = hmac.new(
         META_APP_SECRET.encode(), raw_body, hashlib.sha256
     ).hexdigest()
-    return hmac.compare_digest(expected, header.split("=", 1)[1])
+    received = header.split("=", 1)[1]
+    if hmac.compare_digest(expected, received):
+        return True
+    logger.warning(
+        "Sig FAILED: HMAC mismatch. expected sha256=%s… received sha256=%s… "
+        "Almost always META_APP_SECRET (%s) doesn't match the app that owns this "
+        "webhook subscription.",
+        expected[:12], received[:12], _mask(META_APP_SECRET),
+    )
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -106,17 +161,23 @@ def _process_event(mid, sender_id: str, text) -> None:
     """Whitelist + idempotency guard one message, then route it."""
     # --- Whitelist protection ---
     if not db.is_whitelisted(sender_id):
-        logger.info("Ignoring message from non-whitelisted IGSID: %s", sender_id)
+        logger.info(
+            "IGNORED: IGSID %s not in users whitelist. "
+            "Add it to the users table to serve this person.", sender_id,
+        )
         return
 
     # --- Idempotency: skip webhook retries so expenses aren't double-logged. ---
     if mid and not db.claim_message(mid):
+        logger.info("SKIP duplicate: mid %s already processed.", mid)
         return
 
     if not text:
+        logger.info("Non-text message from %s — sending 'text only' reply.", sender_id)
         send_text(sender_id, "I can only read text messages right now. " + ledger.HELP_TEXT)
         return
 
+    logger.info("MSG from %s (mid=%s): %r", sender_id, mid, text)
     _handle_text(sender_id, text)
 
 
@@ -124,8 +185,10 @@ def _process_event(mid, sender_id: str, text) -> None:
 async def receive_webhook(request: Request):
     # Read the RAW body first — signature verification must run on exact bytes.
     raw_body = await request.body()
+    logger.info("POST /webhook received: %d bytes.", len(raw_body))
 
     if not _valid_signature(raw_body, request.headers.get("X-Hub-Signature-256")):
+        logger.warning("Returning 403 — signature check failed (see above).")
         return Response(content="Invalid signature", status_code=403)
 
     try:
@@ -135,6 +198,7 @@ async def receive_webhook(request: Request):
         return {"status": "ignored"}
 
     events = _extract_events(payload)
+    logger.info("Extracted %d actionable event(s) from payload.", len(events))
     if not events:
         return {"status": "ignored"}  # nothing we handle in this batch
 
@@ -162,6 +226,7 @@ def _handle_text(sender_id: str, text: str) -> None:
         send_text(sender_id, "Sorry, I couldn't process that just now. Please try again.")
         return
 
+    logger.info("Parsed intent=%s for %s", parsed.intent, sender_id)
     if parsed.intent == "expense":
         reply = ledger.process_expense(sender_id, parsed)
     elif parsed.intent == "settle":

@@ -24,12 +24,16 @@ def _require(name: str) -> str:
     return value
 
 
-# --- Meta Instagram Graph API (Messenger platform) ---
-# META_ACCESS_TOKEN is the Permanent Page Access Token for the Facebook Page
-# linked to the Instagram Creator account.
+# --- Instagram API with Instagram Login (graph.instagram.com) ---
+# META_ACCESS_TOKEN is the long-lived Instagram User access token (from Business
+# Login for Instagram). NOT a Facebook Page token — this is the pure-Instagram
+# product, so calls go to graph.instagram.com, not graph.facebook.com.
 META_ACCESS_TOKEN = _require("META_ACCESS_TOKEN")
 META_VERIFY_TOKEN = _require("META_VERIFY_TOKEN")
 GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v25.0")
+# Host for outbound send calls. Instagram-Login product = graph.instagram.com.
+# (Set to graph.facebook.com only if you revert to the Page-linked product.)
+GRAPH_API_HOST = os.getenv("GRAPH_API_HOST", "graph.instagram.com")
 # Own Instagram App-Scoped ID (IGSID). Optional: if set, inbound events whose
 # sender is our own account are dropped as a second echo guard (belt-and-braces
 # with the message.is_echo flag).

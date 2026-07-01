@@ -5,14 +5,15 @@ personal expenses in plain English; SplitBot parses them with Gemini, keeps a
 running "who owes whom" ledger in Supabase, and replies over the Meta Instagram
 Graph API — all through 1-on-1 Instagram Direct chats with the bot.
 
-The bot runs on an **Instagram Creator/Business account linked to a Facebook
-Page**, authenticated with a **Permanent Page Access Token**. Inbound and
-outbound messages use the Messenger platform structure on the Graph API.
+The bot uses the **Instagram API with Instagram Login** (the pure-Instagram
+product — no Facebook Page). It authenticates with a **long-lived Instagram User
+access token** and sends replies via **`graph.instagram.com`**. Inbound webhooks
+use the Messenger-style `entry[].messaging[]` structure.
 
 ## How it works
 
 ```
-Instagram user ──▶ Meta Graph API ──▶ POST /webhook (FastAPI)
+Instagram user ──▶ Meta webhook ──▶ POST /webhook (FastAPI)
                                           │
                         echo guard (skip our own messages)
                                           │
@@ -70,11 +71,12 @@ matches always win over partial ones.
 ## Setup
 
 1. **Meta app / Instagram** — you need:
-   - an Instagram **Creator or Business** account,
-   - linked to a **Facebook Page**,
-   - a Meta app with the **Instagram** product added and Instagram messaging
-     permissions (`instagram_basic`, `instagram_manage_messages`, `pages_messaging`),
-   - a **Permanent Page Access Token** for that Page → `META_ACCESS_TOKEN`.
+   - an Instagram **Professional (Creator or Business)** account,
+   - a Meta app with the **Instagram** product ("Instagram API with Instagram
+     Login") added, and `instagram_business_manage_messages` permission,
+   - **"Allow Access to Messages"** enabled in the IG app's message settings,
+   - a **long-lived Instagram User access token** via Business Login for
+     Instagram → `META_ACCESS_TOKEN`. (No Facebook Page required.)
 
 2. **Database** — in the Supabase SQL editor, run `schema.sql`. Seed the `users`
    table with each friend's **IGSID** and display name (see IGSID note below).

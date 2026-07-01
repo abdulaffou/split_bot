@@ -210,8 +210,8 @@ def render_status() -> str:
 
     if personal:
         lines.append("\n_Personal spends (not split):_")
-        for phone, total in sorted(personal.items(), key=lambda x: -x[1]):
-            lines.append(f"• {db.get_name(phone)}: ₹{total:.2f}")
+        for pid, total in sorted(personal.items(), key=lambda x: -x[1]):
+            lines.append(f"• {db.get_name(pid)}: ₹{total:.2f}")
 
     return "\n".join(lines)
 
