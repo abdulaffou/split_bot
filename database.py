@@ -15,18 +15,23 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # --------------------------------------------------------------------------- #
 # Users / whitelist
 # --------------------------------------------------------------------------- #
-def get_user(phone: str) -> Optional[dict]:
-    """Return the user row for a phone number, or None if not whitelisted."""
+def get_user(instagram_id: str) -> Optional[dict]:
+    """Return the user row for an Instagram ID (IGSID), or None if not whitelisted."""
     try:
-        res = supabase.table("users").select("*").eq("phone_number", phone).execute()
+        res = (
+            supabase.table("users")
+            .select("*")
+            .eq("instagram_id", instagram_id)
+            .execute()
+        )
         return res.data[0] if res.data else None
     except Exception:
-        logger.exception("get_user failed for %s", phone)
+        logger.exception("get_user failed for %s", instagram_id)
         return None
 
 
-def is_whitelisted(phone: str) -> bool:
-    return get_user(phone) is not None
+def is_whitelisted(instagram_id: str) -> bool:
+    return get_user(instagram_id) is not None
 
 
 def get_all_users() -> list[dict]:
@@ -39,18 +44,18 @@ def get_all_users() -> list[dict]:
         return []
 
 
-def get_name(phone: str, fallback: Optional[str] = None) -> str:
-    user = get_user(phone)
+def get_name(instagram_id: str, fallback: Optional[str] = None) -> str:
+    user = get_user(instagram_id)
     if user:
         return user["name"]
-    return fallback or phone
+    return fallback or instagram_id
 
 
 # --------------------------------------------------------------------------- #
 # Transactions
 # --------------------------------------------------------------------------- #
 def insert_transaction(
-    payer_phone: str,
+    payer_id: str,
     amount: float,
     purpose: str,
     date: str,
@@ -62,7 +67,7 @@ def insert_transaction(
             supabase.table("transactions")
             .insert(
                 {
-                    "payer_phone": payer_phone,
+                    "payer_id": payer_id,
                     "amount": amount,
                     "purpose": purpose,
                     "date": date,
@@ -73,22 +78,22 @@ def insert_transaction(
         )
         return res.data[0] if res.data else None
     except Exception:
-        logger.exception("insert_transaction failed for %s", payer_phone)
+        logger.exception("insert_transaction failed for %s", payer_id)
         return None
 
 
 def get_personal_spend_totals() -> dict[str, float]:
-    """Map of payer_phone -> total amount they spent on themselves."""
+    """Map of payer_id -> total amount they spent on themselves."""
     totals: dict[str, float] = {}
     try:
         res = (
             supabase.table("transactions")
-            .select("payer_phone, amount")
+            .select("payer_id, amount")
             .eq("is_personal", True)
             .execute()
         )
         for row in res.data or []:
-            totals[row["payer_phone"]] = totals.get(row["payer_phone"], 0.0) + float(
+            totals[row["payer_id"]] = totals.get(row["payer_id"], 0.0) + float(
                 row["amount"]
             )
     except Exception:

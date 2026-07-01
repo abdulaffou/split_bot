@@ -24,11 +24,16 @@ def _require(name: str) -> str:
     return value
 
 
-# --- Meta WhatsApp Cloud API ---
+# --- Meta Instagram Graph API (Messenger platform) ---
+# META_ACCESS_TOKEN is the Permanent Page Access Token for the Facebook Page
+# linked to the Instagram Creator account.
 META_ACCESS_TOKEN = _require("META_ACCESS_TOKEN")
-PHONE_NUMBER_ID = _require("PHONE_NUMBER_ID")
 META_VERIFY_TOKEN = _require("META_VERIFY_TOKEN")
-GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v21.0")
+GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v25.0")
+# Own Instagram App-Scoped ID (IGSID). Optional: if set, inbound events whose
+# sender is our own account are dropped as a second echo guard (belt-and-braces
+# with the message.is_echo flag).
+INSTAGRAM_ACCOUNT_ID = os.getenv("INSTAGRAM_ACCOUNT_ID", "")
 # App secret used to verify the X-Hub-Signature-256 header on inbound webhooks.
 # Optional: if unset, signature verification is skipped (dev only — a warning is
 # logged). Set it in production to reject forged POSTs.

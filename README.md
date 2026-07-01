@@ -1,26 +1,37 @@
 # SplitBot 🤝
 
-A WhatsApp expense-tracker bot for a fixed group of friends. Log shared or
+An Instagram DM expense-tracker bot for a fixed group of friends. Log shared or
 personal expenses in plain English; SplitBot parses them with Gemini, keeps a
-running "who owes whom" ledger in Supabase, and replies over the official Meta
-WhatsApp Cloud API — all through a 1-on-1 chat with the bot.
+running "who owes whom" ledger in Supabase, and replies over the Meta Instagram
+Graph API — all through 1-on-1 Instagram Direct chats with the bot.
+
+The bot runs on an **Instagram Creator/Business account linked to a Facebook
+Page**, authenticated with a **Permanent Page Access Token**. Inbound and
+outbound messages use the Messenger platform structure on the Graph API.
 
 ## How it works
 
 ```
-WhatsApp user ──▶ Meta Cloud API ──▶ POST /webhook (FastAPI)
+Instagram user ──▶ Meta Graph API ──▶ POST /webhook (FastAPI)
+                                          │
+                        echo guard (skip our own messages)
                                           │
                         whitelist check (users table)
                                           │
-                        Gemini 1.5 Flash parse (parser.py)
+                        Gemini parse (parser.py)
                                           │
              ┌────────────────────────────┴───────────────────────┐
       expense (ledger.py)                                    status / command
    split math + balances update                        render "who owes whom"
              └────────────────────────────┬───────────────────────┘
                                           │
-                          send_text reply (whatsapp.py)
+                          send_text reply (instagram.py)
 ```
+
+Users are identified by their **Instagram App-Scoped User ID (IGSID)** — a long
+integer string delivered on the webhook as `sender.id`. IGSIDs are **not** phone
+numbers and cannot be known ahead of time: you harvest each one from the webhook
+logs the first time that user DMs the bot, then add it to the `users` table.
 
 ## Splitting rules
 
@@ -50,34 +61,54 @@ matches always win over partial ones.
 |------------------|------------------------------------------------------------|
 | `config.py`      | Loads & validates env vars (fails fast on boot)            |
 | `database.py`    | All Supabase reads/writes                                  |
-| `parser.py`      | Gemini structured-output parsing → `ParsedExpense`         |
+| `parser.py`      | Gemini structured-output parsing → `ParsedMessage`         |
 | `ledger.py`      | Split math, balance updates, summary rendering             |
-| `whatsapp.py`    | Outbound Meta Cloud API sender                             |
+| `instagram.py`   | Outbound Instagram Graph API sender (`/me/messages`)       |
 | `main.py`        | FastAPI webhook (GET verify + POST ingest)                 |
-| `schema.sql`     | PostgreSQL schema + seed users                             |
+| `schema.sql`     | PostgreSQL schema + migration + seed users                 |
 
 ## Setup
 
-1. **Database** — in the Supabase SQL editor, run `schema.sql`. Edit the seeded
-   users to your 6 real friends (phone numbers with country code, no `+`).
+1. **Meta app / Instagram** — you need:
+   - an Instagram **Creator or Business** account,
+   - linked to a **Facebook Page**,
+   - a Meta app with the **Instagram** product added and Instagram messaging
+     permissions (`instagram_basic`, `instagram_manage_messages`, `pages_messaging`),
+   - a **Permanent Page Access Token** for that Page → `META_ACCESS_TOKEN`.
 
-2. **Environment** — copy and fill in secrets:
+2. **Database** — in the Supabase SQL editor, run `schema.sql`. Seed the `users`
+   table with each friend's **IGSID** and display name (see IGSID note below).
+
+3. **Environment** — copy and fill in secrets:
    ```bash
    cp .env.example .env
    ```
+   Set `META_ACCESS_TOKEN` (Page token), `META_VERIFY_TOKEN`, `META_APP_SECRET`,
+   `GRAPH_API_VERSION` (default `v25.0`), `GEMINI_API_KEY`, and the Supabase vars.
+   Optionally set `INSTAGRAM_ACCOUNT_ID` (your own IGSID) as a second echo guard.
 
-3. **Install & run**
+4. **Install & run**
    ```bash
    python -m venv .venv && source .venv/bin/activate
    pip install -r requirements.txt
    uvicorn main:app --host 0.0.0.0 --port 8000
    ```
 
-4. **Expose & register the webhook** — point Meta at a public HTTPS URL (e.g. via
-   ngrok during dev: `ngrok http 8000`). In the Meta app dashboard set:
+5. **Expose & register the webhook** — point Meta at a public HTTPS URL (e.g. via
+   ngrok during dev: `ngrok http 8000`). In the Meta app dashboard, under the
+   **Instagram** product → Webhooks:
    - Callback URL: `https://<your-domain>/webhook`
    - Verify token: the same value as `META_VERIFY_TOKEN`
    - Subscribe to the **messages** field.
+
+### Harvesting IGSIDs
+
+An IGSID only exists once a user has messaged the bot. To seed a new friend:
+1. Have them send any DM to the bot's Instagram account.
+2. Read `sender.id` from the incoming webhook (server logs).
+3. `INSERT INTO users (instagram_id, name) VALUES ('<that id>', 'Their Name');`
+
+Until an IGSID is whitelisted, the bot silently ignores that person's messages.
 
 ## Security
 
@@ -86,19 +117,22 @@ matches always win over partial ones.
   dashboard → Settings → Basic). Forged POSTs are rejected with 403. If
   `META_APP_SECRET` is left blank the check is skipped (dev only) and a warning is
   logged — **set it in production**.
-- **Whitelist**: only numbers present in the `users` table are served.
-- **Idempotency**: each WhatsApp message `id` is recorded in `processed_messages`;
-  a re-delivered webhook is skipped so expenses are never double-logged.
+- **Echo guard**: Meta echoes the bot's own outbound messages back as inbound
+  webhooks. Any event with `message.is_echo` (or, if `INSTAGRAM_ACCOUNT_ID` is
+  set, from our own IGSID) is dropped so the bot never replies to itself.
+- **Whitelist**: only IGSIDs present in the `users` table are served.
+- **Idempotency**: each message `mid` is recorded in `processed_messages`; a
+  re-delivered webhook is skipped so expenses are never double-logged.
 
 ## Notes
 
-- Only whitelisted numbers (rows in `users`) are served; everything else is
+- Only whitelisted IGSIDs (rows in `users`) are served; everything else is
   silently ignored.
 - Every external call (Gemini, Meta, Supabase) is wrapped in try/except and
   degrades gracefully with a user-facing message.
+- Non-text messages (images, shares, reactions) get a "text only" reply.
 - `google-generativeai` (used per the spec) prints a `FutureWarning` that it is
   deprecated in favour of `google-genai`. It still works; migrating parser.py to
   `google-genai` is a drop-in follow-up if you want to silence it.
-- The Gemini structured-output schema requires all `ParsedExpense` fields, with
+- The Gemini structured-output schema requires all `ParsedMessage` fields, with
   **no Pydantic defaults** — the SDK's schema converter rejects `default` keys.
-

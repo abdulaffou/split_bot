@@ -1,7 +1,7 @@
-"""SplitBot webhook — FastAPI app for the Meta WhatsApp Cloud API.
+"""SplitBot webhook — FastAPI app for the Meta Instagram Graph API.
 
 GET  /webhook  -> Meta verification handshake.
-POST /webhook  -> ingest incoming messages, parse, act, reply.
+POST /webhook  -> ingest incoming Instagram DMs, parse, act, reply.
 """
 import hashlib
 import hmac
@@ -12,8 +12,13 @@ from fastapi import FastAPI, Request, Response, Query
 import database as db
 import ledger
 from parser import parse_message
-from whatsapp import send_text
-from config import META_VERIFY_TOKEN, META_APP_SECRET, logger
+from instagram import send_text
+from config import (
+    META_VERIFY_TOKEN,
+    META_APP_SECRET,
+    INSTAGRAM_ACCOUNT_ID,
+    logger,
+)
 
 app = FastAPI(title="SplitBot", version="1.1.0")
 
@@ -62,25 +67,57 @@ def _valid_signature(raw_body: bytes, header: str | None) -> bool:
 # --------------------------------------------------------------------------- #
 # POST /webhook  — incoming messages
 # --------------------------------------------------------------------------- #
-def _safe_extract(payload: dict):
-    """Pull (message_id, from_phone, text_body) from the nested Meta payload.
+def _extract_events(payload: dict) -> list[tuple]:
+    """Return (mid, sender_id, text) for every actionable inbound message.
 
-    Returns (None, None, None) for anything that isn't an inbound user message
-    (e.g. delivery/read status callbacks). text_body is None for non-text types.
+    Instagram uses the Messenger structure, and BOTH `entry` and `messaging` are
+    arrays that Meta may batch (several users, or rapid messages from one, in a
+    single POST). We iterate all of them rather than only [0].
+
+        payload['entry'][i]['messaging'][j]
+    with text at messaging_event['message']['text'] and the sender IGSID at
+    messaging_event['sender']['id'].
+
+    Skips anything we don't act on:
+      - non-message events (read receipts, reactions, deliveries, postbacks)
+      - echoes of our OWN outbound messages (message.is_echo, or sender == us),
+        which would otherwise make the bot reply to itself forever
+    `text` is None for a message with no text (e.g. an image/share).
     """
+    events: list[tuple] = []
     try:
-        value = payload["entry"][0]["changes"][0]["value"]
-        messages = value.get("messages")
-        if not messages:
-            return None, None, None  # status callbacks etc. have no 'messages'
-        msg = messages[0]
-        msg_id = msg.get("id")
-        if msg.get("type") != "text":
-            return msg_id, msg.get("from"), None  # non-text message
-        return msg_id, msg["from"], msg["text"]["body"]
-    except (KeyError, IndexError, TypeError):
-        logger.warning("Could not extract message from payload.")
-        return None, None, None
+        for entry in payload.get("entry") or []:
+            for event in entry.get("messaging") or []:
+                sender_id = event.get("sender", {}).get("id")
+                message = event.get("message")
+                if not sender_id or not message:
+                    continue  # read receipt / reaction / postback / malformed
+                if message.get("is_echo"):
+                    continue  # our own outbound — never process
+                if INSTAGRAM_ACCOUNT_ID and sender_id == INSTAGRAM_ACCOUNT_ID:
+                    continue
+                events.append((message.get("mid"), sender_id, message.get("text")))
+    except (KeyError, IndexError, TypeError, AttributeError):
+        logger.warning("Could not extract messages from payload.")
+    return events
+
+
+def _process_event(mid, sender_id: str, text) -> None:
+    """Whitelist + idempotency guard one message, then route it."""
+    # --- Whitelist protection ---
+    if not db.is_whitelisted(sender_id):
+        logger.info("Ignoring message from non-whitelisted IGSID: %s", sender_id)
+        return
+
+    # --- Idempotency: skip webhook retries so expenses aren't double-logged. ---
+    if mid and not db.claim_message(mid):
+        return
+
+    if not text:
+        send_text(sender_id, "I can only read text messages right now. " + ledger.HELP_TEXT)
+        return
+
+    _handle_text(sender_id, text)
 
 
 @app.post("/webhook")
@@ -97,54 +134,41 @@ async def receive_webhook(request: Request):
         logger.exception("Bad JSON on webhook POST.")
         return {"status": "ignored"}
 
-    msg_id, from_phone, text = _safe_extract(payload)
+    events = _extract_events(payload)
+    if not events:
+        return {"status": "ignored"}  # nothing we handle in this batch
 
-    if not from_phone:
-        return {"status": "ignored"}  # not a user message we handle
-
-    # --- Whitelist protection ---
-    if not db.is_whitelisted(from_phone):
-        logger.info("Ignoring message from non-whitelisted number: %s", from_phone)
-        return {"status": "ignored"}
-
-    # --- Idempotency: skip WhatsApp retries so expenses aren't double-logged. ---
-    if msg_id and not db.claim_message(msg_id):
-        return {"status": "duplicate"}
-
-    if not text:
-        send_text(from_phone, "I can only read text messages right now. " + ledger.HELP_TEXT)
-        return {"status": "ok"}
-
-    _handle_text(from_phone, text)
+    for mid, sender_id, text in events:
+        _process_event(mid, sender_id, text)
     return {"status": "ok"}
 
 
-def _handle_text(from_phone: str, text: str) -> None:
+def _handle_text(sender_id: str, text: str) -> None:
     """Route one text message: parse intent, then act and reply."""
     lowered = text.strip().lower()
 
     # Fast-path commands (no AI needed).
     if lowered in {"status", "balance", "balances", "summary"}:
-        send_text(from_phone, ledger.render_status())
+        send_text(sender_id, ledger.render_status())
         return
     if lowered in {"help", "hi", "hello", "start"}:
-        send_text(from_phone, ledger.HELP_TEXT)
+        send_text(sender_id, ledger.HELP_TEXT)
         return
 
     known_names = [u["name"] for u in db.get_all_users()]
     parsed = parse_message(text, known_names=known_names)
 
     if parsed is None:
-        send_text(from_phone, "Sorry, I couldn't process that just now. Please try again.")
+        send_text(sender_id, "Sorry, I couldn't process that just now. Please try again.")
         return
 
     if parsed.intent == "expense":
-        reply = ledger.process_expense(from_phone, parsed)
+        reply = ledger.process_expense(sender_id, parsed)
     elif parsed.intent == "settle":
-        reply = ledger.process_settle(from_phone, parsed)
+        reply = ledger.process_settle(sender_id, parsed)
     elif parsed.intent == "status":
         reply = ledger.render_status()
     else:
         reply = ledger.HELP_TEXT
 
-    send_text(from_phone, reply)
+    send_text(sender_id, reply)

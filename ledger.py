@@ -13,9 +13,9 @@ from config import logger
 def _resolve_names(
     names: list[str], all_users: list[dict]
 ) -> tuple[list[str], list[str], list[tuple[str, list[str]]]]:
-    """Map free-text names to phone numbers.
+    """Map free-text names to Instagram IDs (IGSIDs).
 
-    Returns (matched_phones, unmatched_names, ambiguous) where `ambiguous` is a
+    Returns (matched_ids, unmatched_names, ambiguous) where `ambiguous` is a
     list of (typed_name, [candidate display names]). Exact (case-insensitive)
     matches win over substring matches.
     """
@@ -29,7 +29,7 @@ def _resolve_names(
             continue
         exact = [u for u in all_users if u["name"].lower() == needle]
         if len(exact) == 1:
-            matched.append(exact[0]["phone_number"])
+            matched.append(exact[0]["instagram_id"])
             continue
         if len(exact) > 1:
             ambiguous.append((name, [u["name"] for u in exact]))
@@ -40,7 +40,7 @@ def _resolve_names(
             if needle in u["name"].lower() or u["name"].lower() in needle
         ]
         if len(subs) == 1:
-            matched.append(subs[0]["phone_number"])
+            matched.append(subs[0]["instagram_id"])
         elif len(subs) > 1:
             ambiguous.append((name, [u["name"] for u in subs]))
         else:
@@ -66,17 +66,17 @@ def _clarify_message(unmatched: list[str], ambiguous: list[tuple[str, list[str]]
     )
 
 
-def process_expense(payer_phone: str, parsed: ParsedMessage) -> str:
+def process_expense(payer_id: str, parsed: ParsedMessage) -> str:
     """Record an expense and update balances. Returns the reply text for the payer."""
     if parsed.amount <= 0:
         return "I couldn't read an amount from that. Try e.g. '1200 dinner yesterday'."
 
-    payer_name = db.get_name(payer_phone)
+    payer_name = db.get_name(payer_id)
 
     # --- Personal spend: recorded, never split. ---
     if parsed.is_personal:
         row = db.insert_transaction(
-            payer_phone, parsed.amount, parsed.purpose, parsed.date, is_personal=True
+            payer_id, parsed.amount, parsed.purpose, parsed.date, is_personal=True
         )
         if not row:
             return "Something went wrong saving that. Please try again."
@@ -89,44 +89,44 @@ def process_expense(payer_phone: str, parsed: ParsedMessage) -> str:
     all_users = db.get_all_users()
 
     if parsed.split_everyone or not parsed.participants:
-        participant_phones = [u["phone_number"] for u in all_users]
+        participant_ids = [u["instagram_id"] for u in all_users]
     else:
         matched, unmatched, ambiguous = _resolve_names(parsed.participants, all_users)
         clarify = _clarify_message(unmatched, ambiguous)
         if clarify:  # don't log a mis-parsed split — ask first.
             return clarify
-        participant_phones = matched
-        if payer_phone not in participant_phones:  # payer always shares
-            participant_phones.append(payer_phone)
+        participant_ids = matched
+        if payer_id not in participant_ids:  # payer always shares
+            participant_ids.append(payer_id)
 
     # Deduplicate while preserving order.
-    participant_phones = list(dict.fromkeys(participant_phones))
+    participant_ids = list(dict.fromkeys(participant_ids))
 
-    if len(participant_phones) < 2:
+    if len(participant_ids) < 2:
         return (
             "I couldn't work out who to split this with. "
             "Try naming the people, e.g. '900 cab with Diya and Esha'."
         )
 
     row = db.insert_transaction(
-        payer_phone, parsed.amount, parsed.purpose, parsed.date, is_personal=False
+        payer_id, parsed.amount, parsed.purpose, parsed.date, is_personal=False
     )
     if not row:
         return "Something went wrong saving that. Please try again."
 
-    split = round(parsed.amount / len(participant_phones), 2)
+    split = round(parsed.amount / len(participant_ids), 2)
     failures = 0
-    for phone in participant_phones:
-        if phone == payer_phone:
+    for pid in participant_ids:
+        if pid == payer_id:
             continue  # payer covers own share
-        if not db.add_debt(phone, payer_phone, split):
+        if not db.add_debt(pid, payer_id, split):
             failures += 1
 
-    others = len(participant_phones) - 1
-    names = ", ".join(db.get_name(p) for p in participant_phones if p != payer_phone)
+    others = len(participant_ids) - 1
+    names = ", ".join(db.get_name(p) for p in participant_ids if p != payer_id)
     reply = (
         f"Logged ₹{parsed.amount:.2f} for {parsed.purpose or 'expense'} ({parsed.date}).\n"
-        f"Split {len(participant_phones)} ways = ₹{split:.2f} each.\n"
+        f"Split {len(participant_ids)} ways = ₹{split:.2f} each.\n"
         f"{others} owe {payer_name} ₹{split:.2f} each ({names})."
     )
     if failures:
@@ -134,7 +134,7 @@ def process_expense(payer_phone: str, parsed: ParsedMessage) -> str:
     return reply
 
 
-def process_settle(payer_phone: str, parsed: ParsedMessage) -> str:
+def process_settle(payer_id: str, parsed: ParsedMessage) -> str:
     """Record a payback / settle-up between the sender and one other person."""
     all_users = db.get_all_users()
     matched, unmatched, ambiguous = _resolve_names([parsed.settle_target], all_users)
@@ -145,27 +145,27 @@ def process_settle(payer_phone: str, parsed: ParsedMessage) -> str:
         return "Who did you settle with? Try 'settled with Diya' or 'paid Diya 500'."
 
     target = matched[0]
-    if target == payer_phone:
+    if target == payer_id:
         return "You can't settle with yourself."
 
-    payer_name = db.get_name(payer_phone)
+    payer_name = db.get_name(payer_id)
     target_name = db.get_name(target)
     amount = parsed.settle_amount
 
     # --- Full settle: clear the balance both ways between the two. ---
     if amount <= 0:
-        owed_by_payer = db.get_debt(payer_phone, target)
-        owed_to_payer = db.get_debt(target, payer_phone)
+        owed_by_payer = db.get_debt(payer_id, target)
+        owed_to_payer = db.get_debt(target, payer_id)
         if owed_by_payer <= 0 and owed_to_payer <= 0:
             return f"You and {target_name} are already settled up. 🎉"
-        ok1 = db.set_debt(payer_phone, target, 0)
-        ok2 = db.set_debt(target, payer_phone, 0)
+        ok1 = db.set_debt(payer_id, target, 0)
+        ok2 = db.set_debt(target, payer_id, 0)
         if not (ok1 and ok2):
             return "Something went wrong settling that. Please try again."
         return f"All settled between {payer_name} and {target_name}. 🎉"
 
     # --- Partial payback: the sender paid `amount` toward what they owe target. ---
-    owed_by_payer = db.get_debt(payer_phone, target)
+    owed_by_payer = db.get_debt(payer_id, target)
     if owed_by_payer <= 0:
         return (
             f"You don't currently owe {target_name} anything, so there's nothing to "
@@ -173,7 +173,7 @@ def process_settle(payer_phone: str, parsed: ParsedMessage) -> str:
         )
     applied = min(amount, owed_by_payer)
     remaining = round(owed_by_payer - applied, 2)
-    if not db.set_debt(payer_phone, target, remaining):
+    if not db.set_debt(payer_id, target, remaining):
         return "Something went wrong recording that. Please try again."
 
     reply = f"Recorded: {payer_name} paid {target_name} ₹{applied:.2f}."
