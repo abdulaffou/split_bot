@@ -177,19 +177,27 @@ def _extract_events(payload: dict) -> list[tuple]:
     return events
 
 
-def _process_event(mid, sender_id: str, text) -> None:
-    """Whitelist + idempotency guard one message, then route it."""
-    # --- Whitelist protection ---
-    if not db.is_whitelisted(sender_id):
-        logger.info(
-            "IGNORED: IGSID %s not in users whitelist. "
-            "Add it to the users table to serve this person.", sender_id,
-        )
-        return
+UNKNOWN_SENDER_MSG = (
+    "I don't know who you are 🤔 You're not part of this SplitBot group, so I "
+    "can't track expenses for you."
+)
 
-    # --- Idempotency: skip webhook retries so expenses aren't double-logged. ---
+
+def _process_event(mid, sender_id: str, text) -> None:
+    """Idempotency + whitelist guard one message, then route it."""
+    # --- Idempotency FIRST: applies to unknown senders too, so a webhook retry
+    #     never re-sends the "don't know you" reply (or double-logs an expense). ---
     if mid and not db.claim_message(mid):
         logger.info("SKIP duplicate: mid %s already processed.", mid)
+        return
+
+    # --- Whitelist: unknown senders get a polite reply, then we stop. ---
+    if not db.is_whitelisted(sender_id):
+        logger.info(
+            "Unknown sender %s (not in users whitelist) — replying 'don't know you'.",
+            sender_id,
+        )
+        send_text(sender_id, UNKNOWN_SENDER_MSG)
         return
 
     if not text:
