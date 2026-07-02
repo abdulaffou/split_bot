@@ -87,6 +87,30 @@ def _send_one(recipient_id: str, text: str) -> bool:
         return False
 
 
+def mark_seen(recipient_id: str) -> bool:
+    """Best-effort 'seen' read-receipt via the Instagram sender_action API.
+
+    Sends {"sender_action": "mark_seen"} so the user sees their DM was read,
+    without us sending a text reply. Silent + non-fatal on failure (the
+    Instagram-Login product may not support it on every account/version).
+    """
+    headers = {
+        "Authorization": f"Bearer {META_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {"recipient": {"id": recipient_id}, "sender_action": "mark_seen"}
+    try:
+        resp = requests.post(
+            _MESSAGES_URL, headers=headers, json=payload, timeout=10.0
+        )
+        resp.raise_for_status()
+        logger.info("Marked seen for %s.", recipient_id)
+        return True
+    except Exception as exc:
+        logger.info("mark_seen not delivered for %s (%s) — non-fatal.", recipient_id, exc)
+        return False
+
+
 def send_text(recipient_id: str, body: str) -> bool:
     """Send a plain text reply to an Instagram user. Returns True on success.
 

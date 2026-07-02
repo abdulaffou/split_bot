@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request, Response, Query
 import database as db
 import ledger
 from parser import parse_message
-from instagram import send_text
+from instagram import send_text, mark_seen
 from config import (
     META_VERIFY_TOKEN,
     META_APP_SECRET,
@@ -177,32 +177,24 @@ def _extract_events(payload: dict) -> list[tuple]:
     return events
 
 
-UNKNOWN_SENDER_MSG = (
-    "I don't know who you are 🤔 You're not part of this SplitBot group, so I "
-    "can't track expenses for you."
-)
-
-
 def _process_event(mid, sender_id: str, text) -> None:
-    """Idempotency + whitelist guard one message, then route it."""
-    # --- Idempotency FIRST: applies to unknown senders too, so a webhook retry
-    #     never re-sends the "don't know you" reply (or double-logs an expense). ---
+    """Whitelist guard + idempotency for one message, then route it."""
+    # --- Whitelist FIRST. Unknown senders are recorded (so we can add them to
+    #     the group later) but get NO reply — we don't message strangers, and we
+    #     skip claim_message so their retries can't grow processed_messages. ---
+    if not db.is_whitelisted(sender_id):
+        db.record_unknown_sender(sender_id)
+        logger.info("Unknown sender %s recorded — no reply sent.", sender_id)
+        return
+
+    # --- Idempotency: a webhook retry must not double-log an expense. ---
     if mid and not db.claim_message(mid):
         logger.info("SKIP duplicate: mid %s already processed.", mid)
         return
 
-    # --- Whitelist: unknown senders get a polite reply, then we stop. ---
-    if not db.is_whitelisted(sender_id):
-        logger.info(
-            "Unknown sender %s (not in users whitelist) — replying 'don't know you'.",
-            sender_id,
-        )
-        send_text(sender_id, UNKNOWN_SENDER_MSG)
-        return
-    else:
-        name = db.get_name(sender_id)
-        logger.info("Sender %s is known as %s.", sender_id, name)
-        send_text(sender_id, f"Hi {name}! SUP BIYATCHHH")
+    # Read receipt only — no unsolicited greeting. A greeting reply is sent only
+    # when the user actually says hi/hey/etc. (see _handle_text).
+    mark_seen(sender_id)
 
     if not text:
         logger.info("Non-text message from %s — sending 'text only' reply.", sender_id)
@@ -239,6 +231,12 @@ async def receive_webhook(request: Request):
     return {"status": "ok"}
 
 
+# Words that trigger a personalized greeting reply (case-insensitive, exact).
+_GREETINGS = {
+    "hi", "hii", "hello", "helo", "hey", "heyy", "yo", "sup", "hola", "hey there",
+}
+
+
 def _handle_text(sender_id: str, text: str) -> None:
     """Route one text message: parse intent, then act and reply."""
     lowered = text.strip().lower()
@@ -247,7 +245,12 @@ def _handle_text(sender_id: str, text: str) -> None:
     if lowered in {"status", "balance", "balances", "summary"}:
         send_text(sender_id, ledger.render_status())
         return
-    if lowered in {"help", "hi", "hello", "start"}:
+    # Greeting → personalized hello (the only place we say "hi" by name).
+    if lowered in _GREETINGS:
+        name = db.get_name(sender_id)
+        send_text(sender_id, f"Hey {name}! 👋\n\n" + ledger.HELP_TEXT)
+        return
+    if lowered in {"help", "start", "commands"}:
         send_text(sender_id, ledger.HELP_TEXT)
         return
 

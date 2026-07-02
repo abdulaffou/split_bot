@@ -49,6 +49,14 @@ CREATE TABLE IF NOT EXISTS processed_messages (
     processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 5. Unknown senders: IGSIDs of people who DMed the bot but aren't whitelisted.
+--    We don't reply to them, but we log the id here so you can copy it into the
+--    users table (with a name) to add them to the group.
+CREATE TABLE IF NOT EXISTS unknown_senders (
+    instagram_id TEXT PRIMARY KEY,
+    first_seen   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Seed the group with real IGSIDs. Replace the placeholder ids below with the
 -- values harvested from your webhook logs. (IGSIDs are ~16-17 digit strings.)
 INSERT INTO users (instagram_id, name) VALUES

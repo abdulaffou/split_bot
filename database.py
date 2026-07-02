@@ -51,6 +51,23 @@ def get_name(instagram_id: str, fallback: Optional[str] = None) -> str:
     return fallback or instagram_id
 
 
+def record_unknown_sender(instagram_id: str) -> None:
+    """Persist the IGSID of a non-whitelisted DMer so we can whitelist them later.
+
+    Insert-ignore on the PK: the first sighting is kept, retries/duplicates are
+    no-ops. Never raises — a failure here must not break the webhook.
+    """
+    try:
+        supabase.table("unknown_senders").insert(
+            {"instagram_id": instagram_id}
+        ).execute()
+        logger.info("Recorded new unknown sender %s.", instagram_id)
+    except Exception as exc:
+        if "duplicate" in str(exc).lower() or "23505" in str(exc):
+            return  # already recorded — fine
+        logger.exception("record_unknown_sender failed for %s", instagram_id)
+
+
 # --------------------------------------------------------------------------- #
 # Transactions
 # --------------------------------------------------------------------------- #
