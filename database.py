@@ -122,36 +122,28 @@ def get_personal_spend_totals() -> dict[str, float]:
 # Balances matrix (raw accumulate)
 # --------------------------------------------------------------------------- #
 def add_debt(user_who_owes: str, user_who_is_owed: str, amount: float) -> bool:
-    """Increment net_balance for a (owes, owed) pair, upserting the row.
+    """Record that `user_who_owes` now owes `user_who_is_owed` `amount` more.
 
-    Raw-accumulate model: no bidirectional netting. If A already owes B, this
-    adds to the existing figure; a fresh pair starts at `amount`.
+    Bidirectional netting: if the payee already owes the ower, the new debt
+    cancels against that reverse balance first, so a pair never owes each other
+    in both directions at once (invariant: at most one direction is positive).
+    Example: A owes B ₹333 and B then incurs a ₹333 debt to A → both clear to 0.
     """
     if user_who_owes == user_who_is_owed or amount <= 0:
         return True  # nothing to record
     try:
-        existing = (
-            supabase.table("balances")
-            .select("id, net_balance")
-            .eq("user_who_owes", user_who_owes)
-            .eq("user_who_is_owed", user_who_is_owed)
-            .execute()
-        )
-        if existing.data:
-            row = existing.data[0]
-            new_balance = round(float(row["net_balance"]) + amount, 2)
-            supabase.table("balances").update({"net_balance": new_balance}).eq(
-                "id", row["id"]
-            ).execute()
-        else:
-            supabase.table("balances").insert(
-                {
-                    "user_who_owes": user_who_owes,
-                    "user_who_is_owed": user_who_is_owed,
-                    "net_balance": round(amount, 2),
-                }
-            ).execute()
-        return True
+        # Cancel against any reverse debt (does the payee already owe the ower?).
+        reverse = get_debt(user_who_is_owed, user_who_owes)
+        if reverse > 0:
+            if amount <= reverse:
+                # New debt fully absorbed by the reverse balance.
+                return set_debt(user_who_is_owed, user_who_owes, reverse - amount)
+            # Reverse fully cleared; the leftover flows forward.
+            set_debt(user_who_is_owed, user_who_owes, 0)
+            amount = round(amount - reverse, 2)
+
+        current = get_debt(user_who_owes, user_who_is_owed)
+        return set_debt(user_who_owes, user_who_is_owed, current + amount)
     except Exception:
         logger.exception(
             "add_debt failed: %s owes %s (%s)", user_who_owes, user_who_is_owed, amount

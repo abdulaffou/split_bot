@@ -243,7 +243,7 @@ def _handle_text(sender_id: str, text: str) -> None:
 
     # Fast-path commands (no AI needed).
     if lowered in {"status", "balance", "balances", "summary"}:
-        send_text(sender_id, ledger.render_status())
+        send_text(sender_id, ledger.render_status(sender_id))
         return
     # Greeting → personalized hello (the only place we say "hi" by name).
     if lowered in _GREETINGS:
@@ -267,7 +267,7 @@ def _handle_text(sender_id: str, text: str) -> None:
     elif parsed.intent == "settle":
         reply = ledger.process_settle(sender_id, parsed)
     elif parsed.intent == "status":
-        reply = ledger.render_status()
+        reply = ledger.render_status(sender_id)
     else:
         reply = ledger.HELP_TEXT
 

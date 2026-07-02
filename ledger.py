@@ -189,29 +189,57 @@ def process_settle(payer_id: str, parsed: ParsedMessage) -> str:
     return reply
 
 
-def render_status() -> str:
-    """Human-readable breakdown of who owes whom + personal spend totals."""
+def render_status(viewer_id: str) -> str:
+    """Personalized summary for the requester only.
+
+    Shows what *they* owe, what *they* are owed, their net position, and their
+    OWN personal spend total — never other people's balances or personal spends.
+    """
     balances = db.get_all_balances()
-    personal = db.get_personal_spend_totals()
 
-    lines: list[str] = ["*SplitBot summary*"]
+    you_owe = []       # (other_id, amount) — viewer owes other
+    owed_to_you = []   # (other_id, amount) — other owes viewer
+    for b in balances:
+        amt = float(b["net_balance"])
+        if amt <= 0:
+            continue
+        if b["user_who_owes"] == viewer_id:
+            you_owe.append((b["user_who_is_owed"], amt))
+        elif b["user_who_is_owed"] == viewer_id:
+            owed_to_you.append((b["user_who_owes"], amt))
 
-    if balances:
-        lines.append("\n_Who owes whom:_")
-        for b in balances:
-            amt = float(b["net_balance"])
-            if amt <= 0:
-                continue
-            ower = db.get_name(b["user_who_owes"])
-            owed = db.get_name(b["user_who_is_owed"])
-            lines.append(f"• {ower} owes {owed} ₹{amt:.2f}")
+    total_you_owe = round(sum(a for _, a in you_owe), 2)
+    total_owed_to_you = round(sum(a for _, a in owed_to_you), 2)
+    net = round(total_owed_to_you - total_you_owe, 2)
+
+    my_personal = db.get_personal_spend_totals().get(viewer_id, 0.0)
+
+    lines: list[str] = ["*Your SplitBot summary*"]
+
+    if you_owe:
+        lines.append("\n_You owe:_")
+        for oid, amt in sorted(you_owe, key=lambda x: -x[1]):
+            lines.append(f"• {db.get_name(oid)}: ₹{amt:.2f}")
+        lines.append(f"Total you owe: ₹{total_you_owe:.2f}")
+
+    if owed_to_you:
+        lines.append("\n_Owed to you:_")
+        for oid, amt in sorted(owed_to_you, key=lambda x: -x[1]):
+            lines.append(f"• {db.get_name(oid)}: ₹{amt:.2f}")
+        lines.append(f"Total owed to you: ₹{total_owed_to_you:.2f}")
+
+    if you_owe or owed_to_you:
+        if net > 0:
+            lines.append(f"\n*Net: you're owed ₹{net:.2f}.*")
+        elif net < 0:
+            lines.append(f"\n*Net: you owe ₹{-net:.2f}.*")
+        else:
+            lines.append("\n*Net: you're even. 🎉*")
     else:
-        lines.append("\nNo outstanding balances. All settled! 🎉")
+        lines.append("\nYou have no outstanding balances. All settled! 🎉")
 
-    if personal:
-        lines.append("\n_Personal spends (not split):_")
-        for pid, total in sorted(personal.items(), key=lambda x: -x[1]):
-            lines.append(f"• {db.get_name(pid)}: ₹{total:.2f}")
+    if my_personal > 0:
+        lines.append(f"\n_Your personal spends (not split):_ ₹{my_personal:.2f}")
 
     return "\n".join(lines)
 
