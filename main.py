@@ -255,7 +255,8 @@ def _handle_text(sender_id: str, text: str) -> None:
         return
 
     known_names = [u["name"] for u in db.get_all_users()]
-    parsed = parse_message(text, known_names=known_names)
+    sender_name = db.get_name(sender_id)
+    parsed = parse_message(text, known_names=known_names, sender_name=sender_name)
 
     if parsed is None:
         send_text(sender_id, "Sorry, I couldn't process that just now. Please try again.")

@@ -42,22 +42,25 @@ class ParsedMessage(BaseModel):
     is_personal: bool = Field(
         description="True if the payer bought this only for themselves (e.g. 'my coffee'). Personal spends are NOT split."
     )
+    payer_name: str = Field(
+        description="Name of who actually paid, if it's someone other than the sender (e.g. 'Isha paid for lunch'). Empty string if the sender themselves paid."
+    )
     split_everyone: bool = Field(
         description="True if the expense is shared by the whole group. False if only specific named people share it."
     )
     participants: list[str] = Field(
-        description="Names sharing an expense when split_everyone is False. Empty otherwise. Do NOT include the payer; the app adds them."
+        description="Names sharing an expense when split_everyone is False. Empty otherwise. Do NOT include the payer; the app adds them. If the sender themselves shares the cost, include their real name (given below) instead of 'me'/'I'."
     )
     # --- settle fields ---
-    settle_target: str = Field(
-        description="For a 'settle' intent, the name of the other person being settled with. Empty otherwise."
+    settle_targets: list[str] = Field(
+        description="For a 'settle' intent, the name(s) of the other people being settled with (e.g. 'paid everything to Affou and Isha' -> ['Affou', 'Isha']). Empty otherwise."
     )
     settle_amount: float = Field(
-        description="For a 'settle' intent, the amount paid back. Use 0 to settle the whole balance with that person."
+        description="For a 'settle' intent, the amount paid back, if a specific number was mentioned. Use 0 to settle the whole balance (e.g. 'settled with X', 'paid everything to X and Y'). If a total amount was mentioned but was NOT broken down per person (e.g. 'paid 500 to Affou and Isha'), still report that amount here — the app will ask the user to clarify the split."
     )
 
 
-def _build_prompt(text: str, today: str, known_names: list[str]) -> str:
+def _build_prompt(text: str, today: str, known_names: list[str], sender_name: str) -> str:
     names = ", ".join(known_names) if known_names else "(none)"
     return f"""You are the parsing engine for SplitBot, a shared-expense tracker.
 
@@ -66,6 +69,8 @@ Today's date is {today}. Use it to resolve relative dates like "yesterday",
 Always output the date as YYYY-MM-DD.
 
 The group members are: {names}.
+The message sender's real name is: {sender_name}. Whenever the message says
+"me", "I", "myself", or similar self-reference, use "{sender_name}" in its place.
 
 Set `intent` to exactly one of:
 - "expense": the message records money spent (e.g. "1200 dinner yesterday").
@@ -77,13 +82,21 @@ Set `intent` to exactly one of:
 For intent = "expense", fill amount, purpose, date and:
 - If bought only for the payer ("my", "just for me", "personal"), set
   is_personal = true and split_everyone = false.
+- If someone other than the sender paid (e.g. "Isha paid for lunch"), set
+  payer_name to that person's real name. Otherwise leave payer_name empty
+  (the sender paid).
 - If shared by the whole group, set split_everyone = true, participants = [].
-- If only specific people share it (e.g. "dinner with Aarav and Diya"), set
-  split_everyone = false, is_personal = false, list those names in participants.
-  Do NOT include the payer; the app adds them.
+- If only specific people share it (e.g. "dinner with Aarav and Diya", or
+  "lunch among me and Ali" paid by someone else), set split_everyone = false,
+  is_personal = false, list those names in participants (using "{sender_name}"
+  for any self-reference). Do NOT include the payer; the app adds them.
 
-For intent = "settle", set settle_target to the other person's name and
-settle_amount to the amount paid back (use 0 to settle the entire balance).
+For intent = "settle", set settle_targets to the name(s) of who was settled
+with (can be more than one, e.g. "paid everything to Affou and Isha" ->
+["Affou", "Isha"]), and settle_amount to the amount paid back if one was
+mentioned (use 0 to settle the entire balance). If a single total was given
+for multiple people without a per-person breakdown, still put that total in
+settle_amount — the app will ask the user to clarify.
 
 Leave all fields not relevant to the chosen intent at empty/zero values.
 
@@ -92,7 +105,7 @@ Message to parse:
 
 
 def parse_message(
-    text: str, known_names: Optional[list[str]] = None
+    text: str, known_names: Optional[list[str]] = None, sender_name: str = ""
 ) -> Optional[ParsedMessage]:
     """Parse a message into a ParsedMessage. Returns None on total AI failure."""
     today = date_cls.today().isoformat()
@@ -100,7 +113,7 @@ def parse_message(
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(
-            _build_prompt(text, today, known_names),
+            _build_prompt(text, today, known_names, sender_name),
             generation_config={
                 "response_mime_type": "application/json",
                 # Pass the Pydantic model directly; the SDK converts it to a

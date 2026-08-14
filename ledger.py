@@ -7,6 +7,7 @@ asked to clarify instead, so a mis-typed name can't silently corrupt balances.
 """
 import database as db
 from parser import ParsedMessage
+from instagram import send_text
 from config import logger
 
 
@@ -66,10 +67,21 @@ def _clarify_message(unmatched: list[str], ambiguous: list[tuple[str, list[str]]
     )
 
 
-def process_expense(payer_id: str, parsed: ParsedMessage) -> str:
-    """Record an expense and update balances. Returns the reply text for the payer."""
+def process_expense(sender_id: str, parsed: ParsedMessage) -> str:
+    """Record an expense and update balances. Returns the reply text for the sender."""
     if parsed.amount <= 0:
         return "I couldn't read an amount from that. Try e.g. '1200 dinner yesterday'."
+
+    all_users = db.get_all_users()
+
+    # --- Who actually paid: the sender, unless a different name was given. ---
+    payer_id = sender_id
+    if parsed.payer_name:
+        matched, unmatched, ambiguous = _resolve_names([parsed.payer_name], all_users)
+        clarify = _clarify_message(unmatched, ambiguous)
+        if clarify:
+            return clarify
+        payer_id = matched[0]
 
     payer_name = db.get_name(payer_id)
 
@@ -80,14 +92,13 @@ def process_expense(payer_id: str, parsed: ParsedMessage) -> str:
         )
         if not row:
             return "Something went wrong saving that. Please try again."
+        whose = "your" if payer_id == sender_id else f"{payer_name}'s"
         return (
-            f"Noted your personal spend: ₹{parsed.amount:.2f} on "
+            f"Noted {whose} personal spend: ₹{parsed.amount:.2f} on "
             f"{parsed.purpose or 'something'} ({parsed.date}). Not split."
         )
 
     # --- Shared spend: figure out the participant set. ---
-    all_users = db.get_all_users()
-
     if parsed.split_everyone or not parsed.participants:
         participant_ids = [u["instagram_id"] for u in all_users]
     else:
@@ -135,36 +146,76 @@ def process_expense(payer_id: str, parsed: ParsedMessage) -> str:
 
 
 def process_settle(payer_id: str, parsed: ParsedMessage) -> str:
-    """Record a payback / settle-up between the sender and one other person."""
+    """Record a payback / settle-up between the sender and one or more other people."""
     all_users = db.get_all_users()
-    matched, unmatched, ambiguous = _resolve_names([parsed.settle_target], all_users)
+    matched, unmatched, ambiguous = _resolve_names(parsed.settle_targets, all_users)
     clarify = _clarify_message(unmatched, ambiguous)
     if clarify:
         return clarify
     if not matched:
         return "Who did you settle with? Try 'settled with Diya' or 'paid Diya 500'."
 
-    target = matched[0]
-    if target == payer_id:
+    matched = list(dict.fromkeys(matched))
+    if payer_id in matched:
         return "You can't settle with yourself."
 
     payer_name = db.get_name(payer_id)
-    target_name = db.get_name(target)
     amount = parsed.settle_amount
 
-    # --- Full settle: clear the balance both ways between the two. ---
-    if amount <= 0:
+    # --- Multiple people + an unsplit total: don't guess how it divides. ---
+    if len(matched) > 1 and amount > 0:
+        names = " and ".join(db.get_name(t) for t in matched)
+        return (
+            f"How much did you pay each of {names}? "
+            f"Try settling with them one at a time, e.g. 'paid Diya 500'."
+        )
+
+    if len(matched) == 1 and amount > 0:
+        return _settle_partial(payer_id, matched[0], amount)
+
+    # --- Full settle: clear the balance both ways with each named person. ---
+    settled, already, failed = [], [], []
+    for target in matched:
+        target_name = db.get_name(target)
         owed_by_payer = db.get_debt(payer_id, target)
         owed_to_payer = db.get_debt(target, payer_id)
         if owed_by_payer <= 0 and owed_to_payer <= 0:
-            return f"You and {target_name} are already settled up. 🎉"
+            already.append(target_name)
+            continue
         ok1 = db.set_debt(payer_id, target, 0)
         ok2 = db.set_debt(target, payer_id, 0)
         if not (ok1 and ok2):
-            return "Something went wrong settling that. Please try again."
-        return f"All settled between {payer_name} and {target_name}. 🎉"
+            failed.append(target_name)
+            continue
+        settled.append((target, target_name))
 
-    # --- Partial payback: the sender paid `amount` toward what they owe target. ---
+    not_notified = []
+    for target, target_name in settled:
+        if not send_text(target, f"{payer_name} settled up with you. You're all clear! 🎉"):
+            not_notified.append(target_name)
+
+    if not settled and not already:
+        return "Something went wrong settling that. Please try again."
+
+    lines = []
+    if settled:
+        lines.append(f"Settled with {', '.join(n for _, n in settled)}. 🎉")
+    if already:
+        lines.append(f"Already settled with {', '.join(already)}.")
+    if failed:
+        lines.append(f"(Couldn't settle with {', '.join(failed)} — please try again.)")
+    if not_notified:
+        lines.append(
+            f"({', '.join(not_notified)} couldn't be notified — "
+            f"ask them to message me first.)"
+        )
+    return "\n".join(lines)
+
+
+def _settle_partial(payer_id: str, target: str, amount: float) -> str:
+    """Partial payback: the sender paid `amount` toward what they owe target."""
+    payer_name = db.get_name(payer_id)
+    target_name = db.get_name(target)
     owed_by_payer = db.get_debt(payer_id, target)
     if owed_by_payer <= 0:
         return (
@@ -181,6 +232,8 @@ def process_settle(payer_id: str, parsed: ParsedMessage) -> str:
         reply += f" You still owe {target_name} ₹{remaining:.2f}."
     else:
         reply += f" You're now settled with {target_name}. 🎉"
+        if not send_text(target, f"{payer_name} settled up with you. You're all clear! 🎉"):
+            reply += f"\n({target_name} couldn't be notified — ask them to message me first.)"
     if amount > owed_by_payer:
         reply += (
             f"\n(You only owed ₹{owed_by_payer:.2f}; the extra "
@@ -250,5 +303,6 @@ HELP_TEXT = (
     "• Split with some: '900 cab with Diya and Esha'\n"
     "• Personal (not split): 'my coffee 150'\n"
     "• Pay someone back: 'paid Diya 500' or 'settled with Diya'\n"
+    "• Settle with several people: 'paid everything to Diya and Esha'\n"
     "• See balances: 'status' or 'summary'"
 )
